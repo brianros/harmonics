@@ -1,4 +1,3 @@
-import React from 'react';
 import NoteGenerator from './components/NoteGenerator';
 import './App.css';
 

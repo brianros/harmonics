@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import * as Tone from 'tone';
 import { Midi } from '@tonejs/midi';
 import Soundfont from 'soundfont-player';
+import JSZip from 'jszip';
 
 // Scale interval definitions
 const SCALES = [
@@ -116,6 +117,8 @@ const NoteGenerator: React.FC = () => {
   const [instrument, setInstrument] = useState('Synth');
   const [notes, setNotes] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [zipProgress, setZipProgress] = useState(0);
+  const [sampleDuration, setSampleDuration] = useState(10);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const soundfontRef = useRef<any>(null);
 
@@ -226,6 +229,151 @@ const NoteGenerator: React.FC = () => {
     URL.revokeObjectURL(textUrl);
   };
 
+  const downloadZipSamples = async () => {
+    if (!notes.length) return;
+    
+    setLoading(true);
+    setZipProgress(0);
+    const zip = new JSZip();
+    
+    try {
+      await Tone.start();
+      
+      // Create a buffer for each note
+      for (let i = 0; i < notes.length; i++) {
+        const note = notes[i];
+        
+        // Update progress
+        setZipProgress(Math.round(((i + 1) / notes.length) * 100));
+        
+                 // Generate audio buffer directly instead of using recorder
+         const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+         const sampleRate = audioContext.sampleRate;
+         const duration = sampleDuration; // Use selected duration
+         const bufferSize = sampleRate * duration;
+        const buffer = audioContext.createBuffer(1, bufferSize, sampleRate);
+        const channelData = buffer.getChannelData(0);
+        
+        // Get the frequency for the note
+        const frequency = Tone.Frequency(note).toFrequency();
+        
+        // Generate audio samples
+        for (let j = 0; j < bufferSize; j++) {
+          const time = j / sampleRate;
+          
+          // Create a more complex waveform based on the instrument
+          let sample = 0;
+          
+          if (instrument === 'Piano' || instrument === 'PolySynth') {
+            // Piano-like sound with harmonics
+            sample = Math.sin(2 * Math.PI * frequency * time) * 0.3;
+            sample += Math.sin(2 * Math.PI * frequency * 2 * time) * 0.15;
+            sample += Math.sin(2 * Math.PI * frequency * 3 * time) * 0.1;
+          } else if (instrument === 'FMSynth') {
+            // FM synthesis-like sound
+            const modulator = Math.sin(2 * Math.PI * frequency * 2 * time);
+            sample = Math.sin(2 * Math.PI * frequency * time + modulator * 0.5) * 0.3;
+          } else if (instrument === 'AMSynth') {
+            // AM synthesis-like sound
+            const modulator = Math.sin(2 * Math.PI * frequency * 1.5 * time);
+            sample = Math.sin(2 * Math.PI * frequency * time) * (0.5 + 0.3 * modulator) * 0.3;
+          } else if (instrument === 'PluckSynth') {
+            // Pluck-like sound with decay
+            const decay = Math.exp(-time * 2);
+            sample = Math.sin(2 * Math.PI * frequency * time) * decay * 0.4;
+          } else if (instrument === 'MetalSynth') {
+            // Metal-like sound with inharmonic content
+            sample = Math.sin(2 * Math.PI * frequency * time) * 0.2;
+            sample += Math.sin(2 * Math.PI * frequency * 2.1 * time) * 0.1;
+            sample += Math.sin(2 * Math.PI * frequency * 3.2 * time) * 0.05;
+          } else {
+            // Default synth sound
+            sample = Math.sin(2 * Math.PI * frequency * time) * 0.3;
+          }
+          
+          // Apply envelope (attack, sustain, release)
+          const attackTime = 0.1;
+          const releaseTime = 0.5;
+          let envelope = 1;
+          
+          if (time < attackTime) {
+            envelope = time / attackTime;
+          } else if (time > duration - releaseTime) {
+            envelope = (duration - time) / releaseTime;
+          }
+          
+          channelData[j] = sample * envelope;
+        }
+        
+        // Convert to WAV format
+        const wavBuffer = await audioBufferToWav(buffer);
+        const fileName = `note_${i + 1}_${note.replace('#', 'sharp').replace('b', 'flat')}.wav`;
+        zip.file(fileName, wavBuffer);
+        
+        // Clean up audio context
+        audioContext.close();
+      }
+      
+      // Generate the zip file
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+             a.download = `harmonics_samples_${root}_${SCALES[scaleIdx].name.toLowerCase()}_${sampleDuration}s.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+    } catch (error) {
+      console.error('Error generating zip file:', error);
+      alert('Error generating zip file. Please try again.');
+    } finally {
+      setLoading(false);
+      setZipProgress(0);
+    }
+  };
+
+  // Helper function to convert AudioBuffer to WAV format
+  const audioBufferToWav = async (buffer: AudioBuffer): Promise<ArrayBuffer> => {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const length = buffer.length;
+    const arrayBuffer = new ArrayBuffer(44 + length * numChannels * 2);
+    const view = new DataView(arrayBuffer);
+    
+    // WAV header
+    const writeString = (offset: number, string: string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + length * numChannels * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * 2, true);
+    view.setUint16(32, numChannels * 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, length * numChannels * 2, true);
+    
+    // Write audio data
+    let offset = 44;
+    for (let i = 0; i < length; i++) {
+      for (let channel = 0; channel < numChannels; channel++) {
+        const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
+        view.setInt16(offset, sample * 0x7FFF, true);
+        offset += 2;
+      }
+    }
+    
+    return arrayBuffer;
+  };
+
   return (
     <div style={{ maxWidth: 400, margin: 'auto' }}>
       <h2>Note & Harmonics Generator</h2>
@@ -251,18 +399,49 @@ const NoteGenerator: React.FC = () => {
         <input type="number" min={1} max={5} value={noteCount} onChange={e => setNoteCount(Number(e.target.value))} />
       </label>
       <br />
-      <label>Instrument:
-        <select value={instrument} onChange={e => setInstrument(e.target.value)}>
-          {INSTRUMENTS.map(i => <option key={i.value} value={i.value}>{i.label}</option>)}
-        </select>
-      </label>
-      <br />
+             <label>Instrument:
+         <select value={instrument} onChange={e => setInstrument(e.target.value)}>
+           {INSTRUMENTS.map(i => <option key={i.value} value={i.value}>{i.label}</option>)}
+         </select>
+       </label>
+       <br />
+       <label>Sample Duration (seconds):
+         <select value={sampleDuration} onChange={e => setSampleDuration(Number(e.target.value))}>
+           <option value={1}>1 second</option>
+           <option value={3}>3 seconds</option>
+           <option value={5}>5 seconds</option>
+           <option value={10}>10 seconds</option>
+           <option value={15}>15 seconds</option>
+           <option value={30}>30 seconds</option>
+         </select>
+       </label>
+       <br />
       {loading && <div>Loading instrument samples...</div>}
       <button onClick={generateNotes}>Generate</button>
       <button onClick={playNotes} disabled={!notes.length || loading}>Preview</button>
       <button onClick={playMelody} disabled={!notes.length || loading}>Play Melody</button>
       <button onClick={exportMidi} disabled={!notes.length}>Export MIDI</button>
       <button onClick={exportText} disabled={!notes.length}>Export Text</button>
+             <button onClick={downloadZipSamples} disabled={!notes.length || loading}>Download {sampleDuration}s Samples</button>
+      {loading && zipProgress > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div>Generating samples: {zipProgress}%</div>
+          <div style={{ 
+            width: '100%', 
+            height: '20px', 
+            backgroundColor: '#f0f0f0', 
+            borderRadius: '10px',
+            overflow: 'hidden'
+          }}>
+            <div style={{ 
+              width: `${zipProgress}%`, 
+              height: '100%', 
+              backgroundColor: '#4CAF50', 
+              transition: 'width 0.3s ease'
+            }}></div>
+          </div>
+        </div>
+      )}
       <div style={{ marginTop: 16 }}>
         <strong>Notes:</strong> {notes.join(', ')}
       </div>
