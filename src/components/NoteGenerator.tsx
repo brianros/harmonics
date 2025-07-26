@@ -118,7 +118,7 @@ const NoteGenerator: React.FC = () => {
   const [notes, setNotes] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [zipProgress, setZipProgress] = useState(0);
-  const [sampleDuration, setSampleDuration] = useState(10);
+  const [sampleDuration, setSampleDuration] = useState(2);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const soundfontRef = useRef<any>(null);
 
@@ -405,15 +405,16 @@ const NoteGenerator: React.FC = () => {
          </select>
        </label>
        <br />
-       <label>Sample Duration (seconds):
-         <select value={sampleDuration} onChange={e => setSampleDuration(Number(e.target.value))}>
-           <option value={1}>1 second</option>
-           <option value={3}>3 seconds</option>
-           <option value={5}>5 seconds</option>
-           <option value={10}>10 seconds</option>
-           <option value={15}>15 seconds</option>
-           <option value={30}>30 seconds</option>
-         </select>
+       <label>Sample Duration: {sampleDuration} seconds
+         <input 
+           type="range" 
+           min="0.5" 
+           max="10" 
+           step="0.5" 
+           value={sampleDuration} 
+           onChange={e => setSampleDuration(Number(e.target.value))}
+           style={{ width: '100%', marginTop: '4px' }}
+         />
        </label>
        <br />
       {loading && <div>Loading instrument samples...</div>}
