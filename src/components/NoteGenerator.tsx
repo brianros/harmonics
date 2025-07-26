@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as Tone from 'tone';
 import { Midi } from '@tonejs/midi';
 import Soundfont from 'soundfont-player';
@@ -119,24 +119,119 @@ const NoteGenerator: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [zipProgress, setZipProgress] = useState(0);
   const [sampleDuration, setSampleDuration] = useState(2);
+  const [preloadProgress, setPreloadProgress] = useState(0);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const soundfontRef = useRef<any>(null);
+  
+  // Add caching for instruments
+  const instrumentCache = useRef<Map<string, any>>(new Map());
+  const samplerCache = useRef<Map<string, Tone.Sampler>>(new Map());
+  const [preloadedInstruments, setPreloadedInstruments] = useState<Set<string>>(new Set());
 
   // Compute the rotated interval pattern for the selected mode
   const rotatedIntervals = rotateIntervals(SCALES[scaleIdx].intervals, MODES[modeIdx].degree);
   const scaleNotes = buildScale(root, rotatedIntervals);
 
-  const getSynthOrSampler = async () => {
+  // Preload common instruments when component mounts
+  useEffect(() => {
+    const preloadCommonInstruments = async () => {
+      const commonInstruments = ['Synth', 'Piano', 'violin', 'flute'];
+      
+      for (let i = 0; i < commonInstruments.length; i++) {
+        const instr = commonInstruments[i];
+        try {
+          setPreloadProgress(Math.round(((i + 1) / commonInstruments.length) * 100));
+          
+          if (isSoundfontInstrument(instr)) {
+            await preloadSoundfontInstrument(instr);
+          } else if (instr === 'Piano') {
+            await preloadSampler(instr);
+          }
+          setPreloadedInstruments(prev => new Set([...prev, instr]));
+        } catch (error) {
+          console.warn(`Failed to preload ${instr}:`, error);
+        }
+      }
+      setPreloadProgress(0);
+    };
+
+    preloadCommonInstruments();
+  }, []);
+
+  // Preload instrument when user changes selection
+  useEffect(() => {
+    const preloadSelectedInstrument = async () => {
+      if (preloadedInstruments.has(instrument)) {
+        return; // Already preloaded
+      }
+
+      try {
+        if (isSoundfontInstrument(instrument)) {
+          await preloadSoundfontInstrument(instrument);
+        } else if (instrument === 'Piano') {
+          await preloadSampler(instrument);
+        }
+        setPreloadedInstruments(prev => new Set([...prev, instrument]));
+      } catch (error) {
+        console.warn(`Failed to preload ${instrument}:`, error);
+      }
+    };
+
+    preloadSelectedInstrument();
+  }, [instrument]);
+
+  // Preload soundfont instrument
+  const preloadSoundfontInstrument = async (instrumentName: string) => {
+    if (instrumentCache.current.has(instrumentName)) {
+      return instrumentCache.current.get(instrumentName);
+    }
+
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+
+    const instrument = await Soundfont.instrument(audioCtxRef.current, instrumentName as any);
+    instrumentCache.current.set(instrumentName, instrument);
+    return instrument;
+  };
+
+  // Preload sampler
+  const preloadSampler = async (instrumentName: string) => {
+    if (samplerCache.current.has(instrumentName)) {
+      return samplerCache.current.get(instrumentName);
+    }
+
+    const sampler = new Tone.Sampler({
+      urls: SAMPLE_MAP[instrumentName].urls,
+      baseUrl: SAMPLE_MAP[instrumentName].baseUrl,
+    }).toDestination();
+    
+    await sampler.loaded;
+    samplerCache.current.set(instrumentName, sampler);
+    return sampler;
+  };
+
+  const getSynthOrSampler = useCallback(async () => {
     if (instrument === 'Piano') {
+      // Check cache first
+      if (samplerCache.current.has(instrument)) {
+        return samplerCache.current.get(instrument);
+      }
+
+      // Load in background without blocking UI
+      const loadPromise = preloadSampler(instrument);
       setLoading(true);
-      const sampler = new Tone.Sampler({
-        urls: SAMPLE_MAP[instrument].urls,
-        baseUrl: SAMPLE_MAP[instrument].baseUrl,
-        onload: () => setLoading(false),
-      }).toDestination();
-      await sampler.loaded;
-      setLoading(false);
-      return sampler;
+      
+      // If we need it immediately, wait for it
+      if (loading) {
+        const sampler = await loadPromise;
+        setLoading(false);
+        return sampler;
+      } else {
+        // Otherwise, let it load in background
+        loadPromise.then(() => setLoading(false));
+        // Return a temporary synth while loading
+        return new Tone.Synth().toDestination();
+      }
     } else if (instrument === 'PolySynth') {
       return new Tone.PolySynth().toDestination();
     } else if ((Tone as any)[instrument]) {
@@ -144,17 +239,30 @@ const NoteGenerator: React.FC = () => {
     } else {
       return new Tone.Synth().toDestination();
     }
-  };
+  }, [instrument, loading]);
 
-  const getSoundfontInstrument = async () => {
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const getSoundfontInstrument = useCallback(async () => {
+    // Check cache first
+    if (instrumentCache.current.has(instrument)) {
+      return instrumentCache.current.get(instrument);
     }
+
+    // Load in background without blocking UI
+    const loadPromise = preloadSoundfontInstrument(instrument);
     setLoading(true);
-    soundfontRef.current = await Soundfont.instrument(audioCtxRef.current, instrument as any);
-    setLoading(false);
-    return soundfontRef.current;
-  };
+    
+    // If we need it immediately, wait for it
+    if (loading) {
+      const player = await loadPromise;
+      setLoading(false);
+      return player;
+    } else {
+      // Otherwise, let it load in background
+      loadPromise.then(() => setLoading(false));
+      // Return a temporary synth while loading
+      return new Tone.Synth().toDestination();
+    }
+  }, [instrument, loading]);
 
   const generateNotes = () => {
     const selected = getRandomElements(scaleNotes.slice(0, 7), noteCount);
@@ -418,12 +526,61 @@ const NoteGenerator: React.FC = () => {
        </label>
        <br />
       {loading && <div>Loading instrument samples...</div>}
+      {preloadProgress > 0 && (
+        <div style={{ marginBottom: '8px' }}>
+          <div>Preloading instruments: {preloadProgress}%</div>
+          <div style={{ 
+            width: '100%', 
+            height: '16px', 
+            backgroundColor: '#f0f0f0', 
+            borderRadius: '8px',
+            overflow: 'hidden'
+          }}>
+            <div style={{ 
+              width: `${preloadProgress}%`, 
+              height: '100%', 
+              backgroundColor: '#2196F3', 
+              transition: 'width 0.3s ease'
+            }}></div>
+          </div>
+        </div>
+      )}
+      {preloadedInstruments.size > 0 && (
+        <div style={{ fontSize: '0.8em', color: '#666', marginBottom: '8px' }}>
+          Preloaded: {Array.from(preloadedInstruments).join(', ')}
+        </div>
+      )}
       <button onClick={generateNotes}>Generate</button>
       <button onClick={playNotes} disabled={!notes.length || loading}>Preview</button>
       <button onClick={playMelody} disabled={!notes.length || loading}>Play Melody</button>
-      <button onClick={exportMidi} disabled={!notes.length}>Export MIDI</button>
+            <button onClick={exportMidi} disabled={!notes.length}>Export MIDI</button>
       <button onClick={exportText} disabled={!notes.length}>Export Text</button>
-             <button onClick={downloadZipSamples} disabled={!notes.length || loading}>Download {sampleDuration}s Samples</button>
+      <button onClick={downloadZipSamples} disabled={!notes.length || loading}>Download {sampleDuration}s Samples</button>
+      <button 
+        onClick={async () => {
+          setPreloadProgress(0);
+          const allInstruments = INSTRUMENTS.map(i => i.value);
+          for (let i = 0; i < allInstruments.length; i++) {
+            const instr = allInstruments[i];
+            try {
+              setPreloadProgress(Math.round(((i + 1) / allInstruments.length) * 100));
+              if (isSoundfontInstrument(instr)) {
+                await preloadSoundfontInstrument(instr);
+              } else if (instr === 'Piano') {
+                await preloadSampler(instr);
+              }
+              setPreloadedInstruments(prev => new Set([...prev, instr]));
+            } catch (error) {
+              console.warn(`Failed to preload ${instr}:`, error);
+            }
+          }
+          setPreloadProgress(0);
+        }}
+        disabled={loading}
+        style={{ fontSize: '0.8em', padding: '4px 8px' }}
+      >
+        Preload All Instruments
+      </button>
       {loading && zipProgress > 0 && (
         <div style={{ marginTop: 8 }}>
           <div>Generating samples: {zipProgress}%</div>
